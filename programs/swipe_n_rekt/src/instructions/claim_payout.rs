@@ -1,7 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{
-    transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
-};
+use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::constants::*;
 use crate::errors::SwipeError;
@@ -30,27 +28,18 @@ pub struct ClaimPayout<'info> {
     )]
     pub position: Account<'info, Position>,
 
+    /// Native-SOL escrow vault (system-owned PDA holding lamports only).
     #[account(
         mut,
         seeds = [VAULT_SEED, market.key().as_ref()],
         bump = market.vault_bump,
     )]
-    pub vault: InterfaceAccount<'info, TokenAccount>,
-
-    #[account(address = market.mint)]
-    pub mint: InterfaceAccount<'info, Mint>,
-
-    #[account(
-        mut,
-        constraint = user_token_account.mint == market.mint,
-        constraint = user_token_account.owner == user.key(),
-    )]
-    pub user_token_account: InterfaceAccount<'info, TokenAccount>,
+    pub vault: SystemAccount<'info>,
 
     #[account(mut)]
     pub user: Signer<'info>,
 
-    pub token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handler(ctx: Context<ClaimPayout>) -> Result<()> {
@@ -81,33 +70,21 @@ pub fn handler(ctx: Context<ClaimPayout>) -> Result<()> {
         .checked_div(total_winning as u128)
         .ok_or(SwipeError::Overflow)? as u64;
 
-    // Transfer from vault → user. The vault's token::authority is the MARKET
-    // PDA, so we sign the CPI with the market's seeds.
+    // Move lamports from the vault PDA → user. The vault is a system-owned PDA
+    // with no data, so it can sign a System Program transfer with its own seeds.
     let market_key = market.key();
-    let fixture_le = market.fixture_id.to_le_bytes();
-    let stat_le = market.stat_key.to_le_bytes();
-    let win_le = market.window_start.to_le_bytes();
-    let market_signer: &[&[u8]] = &[
-        MARKET_SEED,
-        &fixture_le,
-        &stat_le,
-        &win_le,
-        &[market.bump],
-    ];
+    let vault_signer: &[&[u8]] = &[VAULT_SEED, market_key.as_ref(), &[market.vault_bump]];
 
-    transfer_checked(
+    transfer(
         CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            TransferChecked {
+            ctx.accounts.system_program.to_account_info(),
+            Transfer {
                 from: ctx.accounts.vault.to_account_info(),
-                mint: ctx.accounts.mint.to_account_info(),
-                to: ctx.accounts.user_token_account.to_account_info(),
-                authority: ctx.accounts.market.to_account_info(),
+                to: ctx.accounts.user.to_account_info(),
             },
-            &[market_signer],
+            &[vault_signer],
         ),
         payout,
-        ctx.accounts.mint.decimals,
     )?;
 
     let position = &mut ctx.accounts.position;

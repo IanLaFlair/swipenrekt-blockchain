@@ -33,7 +33,7 @@ pub enum MarketStatus {
     Settled,
 }
 
-/// One swipe card == one market.
+/// One swipe card == one market. Value is escrowed in native SOL (lamports).
 #[account]
 #[derive(InitSpace)]
 pub struct Market {
@@ -49,17 +49,15 @@ pub struct Market {
     pub comparison: u8,
     pub window_start: i64,
     pub window_end: i64,
-    /// Total USDC staked on YES.
+    /// Total lamports staked on YES.
     pub total_yes: u64,
-    /// Total USDC staked on NO.
+    /// Total lamports staked on NO.
     pub total_no: u64,
     pub status: MarketStatus,
     /// Winning side once settled: 0 = NO, 1 = YES.
     pub winning_side: Option<u8>,
     /// Authority allowed to settle this market (backend keeper).
     pub authority: Pubkey,
-    /// The USDC mint used for this market's escrow.
-    pub mint: Pubkey,
     pub bump: u8,
     pub vault_bump: u8,
 }

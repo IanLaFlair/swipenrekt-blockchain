@@ -1,20 +1,15 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program, BN } from "@coral-xyz/anchor";
 import { SwipeNRekt } from "../target/types/swipe_n_rekt";
-import {
-  TOKEN_PROGRAM_ID,
-  createMint,
-  getOrCreateAssociatedTokenAccount,
-  mintTo,
-  getAccount,
-} from "@solana/spl-token";
 import { Keypair, PublicKey, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { assert } from "chai";
 
+// All value transfers are native SOL (lamports, 9 decimals).
 const SIDE_NO = 0;
 const SIDE_YES = 1;
 const CMP_GT = 0; // GreaterThan
 const enc = anchor.utils.bytes.utf8.encode;
+const SOL = LAMPORTS_PER_SOL;
 
 describe("swipe_n_rekt", () => {
   const provider = anchor.AnchorProvider.env();
@@ -23,7 +18,6 @@ describe("swipe_n_rekt", () => {
   const conn = provider.connection;
   const authority = (provider.wallet as anchor.Wallet).payer;
 
-  let mint: PublicKey;
   const alice = Keypair.generate(); // YES bettor (winner)
   const bob = Keypair.generate(); // NO bettor (loser)
 
@@ -43,35 +37,27 @@ describe("swipe_n_rekt", () => {
     new BN(statKey).toArrayLike(Buffer, "le", 4),
     windowStart.toArrayLike(Buffer, "le", 8),
   ];
+  const posPda = (who: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [enc("position"), market.toBuffer(), who.toBuffer()],
+      program.programId
+    )[0];
 
   before(async () => {
     for (const kp of [alice, bob]) {
-      const sig = await conn.requestAirdrop(kp.publicKey, 2 * LAMPORTS_PER_SOL);
+      const sig = await conn.requestAirdrop(kp.publicKey, 100 * SOL);
       await conn.confirmTransaction(sig);
     }
-    // 6-decimal mint like USDC.
-    mint = await createMint(conn, authority, authority.publicKey, null, 6);
-
     [rewardPool] = PublicKey.findProgramAddressSync([enc("reward_pool")], program.programId);
     [rewardVault] = PublicKey.findProgramAddressSync([enc("reward_vault")], program.programId);
     [market] = PublicKey.findProgramAddressSync(marketSeeds(), program.programId);
-    [vault] = PublicKey.findProgramAddressSync(
-      [enc("vault"), market.toBuffer()],
-      program.programId
-    );
+    [vault] = PublicKey.findProgramAddressSync([enc("vault"), market.toBuffer()], program.programId);
   });
 
   it("initializes the reward pool", async () => {
     await program.methods
       .initializeRewardPool()
-      .accounts({
-        rewardPool,
-        rewardVault,
-        mint,
-        authority: authority.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
+      .accounts({ rewardPool, authority: authority.publicKey, systemProgram: SystemProgram.programId })
       .rpc();
     const pool = await program.account.rewardPool.fetch(rewardPool);
     assert.equal(pool.totalCollected.toNumber(), 0);
@@ -80,14 +66,7 @@ describe("swipe_n_rekt", () => {
   it("initializes a market", async () => {
     await program.methods
       .initializeMarket(fixtureId, statKey, period, threshold, CMP_GT, windowStart, windowEnd)
-      .accounts({
-        market,
-        vault,
-        mint,
-        authority: authority.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
+      .accounts({ market, authority: authority.publicKey, systemProgram: SystemProgram.programId })
       .rpc();
     const m = await program.account.market.fetch(market);
     assert.equal(m.fixtureId.toString(), fixtureId.toString());
@@ -95,70 +74,44 @@ describe("swipe_n_rekt", () => {
     assert.deepEqual(m.status, { open: {} });
   });
 
-  const fund = async (kp: Keypair, amount: number) => {
-    const ata = await getOrCreateAssociatedTokenAccount(conn, authority, mint, kp.publicKey);
-    await mintTo(conn, authority, mint, ata.address, authority, amount);
-    return ata.address;
-  };
-
-  it("takes bets on both sides, collecting 2% fee", async () => {
-    const aliceAta = await fund(alice, 100_000_000); // 100 USDC
-    const bobAta = await fund(bob, 100_000_000);
-
-    const [alicePos] = PublicKey.findProgramAddressSync(
-      [enc("position"), market.toBuffer(), alice.publicKey.toBuffer()],
-      program.programId
-    );
-    const [bobPos] = PublicKey.findProgramAddressSync(
-      [enc("position"), market.toBuffer(), bob.publicKey.toBuffer()],
-      program.programId
-    );
-
-    // Alice bets 100 USDC YES.
+  it("takes bets on both sides, collecting 2% fee (in SOL)", async () => {
+    // Alice bets 1 SOL YES, Bob bets 1 SOL NO.
     await program.methods
-      .placeBet(SIDE_YES, new BN(100_000_000), 5000)
+      .placeBet(SIDE_YES, new BN(1 * SOL), 5000)
       .accounts({
         market,
-        position: alicePos,
+        position: posPda(alice.publicKey),
         vault,
         rewardPool,
         rewardVault,
-        mint,
-        userTokenAccount: aliceAta,
         user: alice.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
       .signers([alice])
       .rpc();
 
-    // Bob bets 100 USDC NO.
     await program.methods
-      .placeBet(SIDE_NO, new BN(100_000_000), 5000)
+      .placeBet(SIDE_NO, new BN(1 * SOL), 5000)
       .accounts({
         market,
-        position: bobPos,
+        position: posPda(bob.publicKey),
         vault,
         rewardPool,
         rewardVault,
-        mint,
-        userTokenAccount: bobAta,
         user: bob.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
       .signers([bob])
       .rpc();
 
     const m = await program.account.market.fetch(market);
-    // 2% fee -> 98 USDC net each side.
-    assert.equal(m.totalYes.toNumber(), 98_000_000);
-    assert.equal(m.totalNo.toNumber(), 98_000_000);
+    // 2% fee -> 0.98 SOL net each side.
+    assert.equal(m.totalYes.toNumber(), 0.98 * SOL);
+    assert.equal(m.totalNo.toNumber(), 0.98 * SOL);
 
-    const rv = await getAccount(conn, rewardVault);
-    assert.equal(Number(rv.amount), 4_000_000); // 2 + 2 USDC fees
-    const v = await getAccount(conn, vault);
-    assert.equal(Number(v.amount), 196_000_000);
+    // Vault balances are PDAs (no tx-fee noise) — assert exactly.
+    assert.equal(await conn.getBalance(rewardVault), 0.04 * SOL); // 0.02 + 0.02
+    assert.equal(await conn.getBalance(vault), 1.96 * SOL);
   });
 
   it("settles the market (mock) as YES", async () => {
@@ -172,55 +125,27 @@ describe("swipe_n_rekt", () => {
   });
 
   it("pays the winner the whole pot, rejects the loser", async () => {
-    const aliceAta = await getOrCreateAssociatedTokenAccount(
-      conn,
-      authority,
-      mint,
-      alice.publicKey
-    );
-    const before = Number((await getAccount(conn, aliceAta.address)).amount);
+    const vaultBefore = await conn.getBalance(vault);
+    const aliceBefore = await conn.getBalance(alice.publicKey);
 
-    const [alicePos] = PublicKey.findProgramAddressSync(
-      [enc("position"), market.toBuffer(), alice.publicKey.toBuffer()],
-      program.programId
-    );
     await program.methods
       .claimPayout()
-      .accounts({
-        market,
-        position: alicePos,
-        vault,
-        mint,
-        userTokenAccount: aliceAta.address,
-        user: alice.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
+      .accounts({ market, position: posPda(alice.publicKey), vault, user: alice.publicKey, systemProgram: SystemProgram.programId })
       .signers([alice])
       .rpc();
 
-    const after = Number((await getAccount(conn, aliceAta.address)).amount);
-    // Alice is the only YES staker -> collects the entire 196 USDC pot.
-    assert.equal(after - before, 196_000_000);
+    // Alice is the only YES staker -> the entire 1.96 SOL pot leaves the vault.
+    assert.equal(vaultBefore - (await conn.getBalance(vault)), 1.96 * SOL);
+    // Alice receives it (minus her own ~5000-lamport tx fee).
+    const gained = (await conn.getBalance(alice.publicKey)) - aliceBefore;
+    assert.isAbove(gained, 1.96 * SOL - 20_000);
 
     // Bob (loser) cannot claim.
-    const bobAta = await getOrCreateAssociatedTokenAccount(conn, authority, mint, bob.publicKey);
-    const [bobPos] = PublicKey.findProgramAddressSync(
-      [enc("position"), market.toBuffer(), bob.publicKey.toBuffer()],
-      program.programId
-    );
     let failed = false;
     try {
       await program.methods
         .claimPayout()
-        .accounts({
-          market,
-          position: bobPos,
-          vault,
-          mint,
-          userTokenAccount: bobAta.address,
-          user: bob.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
+        .accounts({ market, position: posPda(bob.publicKey), vault, user: bob.publicKey, systemProgram: SystemProgram.programId })
         .signers([bob])
         .rpc();
     } catch {
@@ -239,12 +164,7 @@ describe("swipe_n_rekt", () => {
     const asset = Keypair.generate().publicKey;
     await program.methods
       .mintCard(catalogId, rarity)
-      .accounts({
-        cardSupply,
-        user: alice.publicKey,
-        asset,
-        systemProgram: SystemProgram.programId,
-      })
+      .accounts({ cardSupply, user: alice.publicKey, asset, systemProgram: SystemProgram.programId })
       .signers([alice])
       .rpc();
     const cs = await program.account.cardSupply.fetch(cardSupply);
@@ -253,28 +173,14 @@ describe("swipe_n_rekt", () => {
     assert.equal(cs.rarity, 4);
   });
 
-  it("distributes a % of the reward pool to a set completer", async () => {
-    const winnerAta = await getOrCreateAssociatedTokenAccount(
-      conn,
-      authority,
-      mint,
-      bob.publicKey
-    );
-    const before = Number((await getAccount(conn, winnerAta.address)).amount);
-    // 4 USDC in pool, distribute 50% = 2 USDC.
+  it("distributes a % of the reward pool to a set completer (SOL)", async () => {
+    const bobBefore = await conn.getBalance(bob.publicKey);
+    // 0.04 SOL in pool, distribute 50% = 0.02 SOL. Bob is the recipient (not a
+    // signer here — the authority pays the tx fee), so his delta is exact.
     await program.methods
       .claimSetReward(7, 1, 5000)
-      .accounts({
-        rewardPool,
-        rewardVault,
-        mint,
-        userTokenAccount: winnerAta.address,
-        user: bob.publicKey,
-        authority: authority.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
+      .accounts({ rewardPool, rewardVault, user: bob.publicKey, authority: authority.publicKey, systemProgram: SystemProgram.programId })
       .rpc();
-    const after = Number((await getAccount(conn, winnerAta.address)).amount);
-    assert.equal(after - before, 2_000_000);
+    assert.equal((await conn.getBalance(bob.publicKey)) - bobBefore, 0.02 * SOL);
   });
 });

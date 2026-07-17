@@ -1,7 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{
-    transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
-};
+use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::constants::*;
 use crate::errors::SwipeError;
@@ -31,12 +29,15 @@ pub struct PlaceBet<'info> {
     )]
     pub position: Account<'info, Position>,
 
+    /// Native-SOL escrow vault: a system-owned PDA that holds lamports only (no
+    /// data), so it can both receive a `system_program::transfer` and later sign
+    /// one out with its seeds. Created implicitly by the first deposit.
     #[account(
         mut,
         seeds = [VAULT_SEED, market.key().as_ref()],
         bump = market.vault_bump,
     )]
-    pub vault: InterfaceAccount<'info, TokenAccount>,
+    pub vault: SystemAccount<'info>,
 
     #[account(
         mut,
@@ -50,22 +51,11 @@ pub struct PlaceBet<'info> {
         seeds = [REWARD_VAULT_SEED],
         bump = reward_pool.vault_bump,
     )]
-    pub reward_vault: InterfaceAccount<'info, TokenAccount>,
-
-    #[account(address = market.mint)]
-    pub mint: InterfaceAccount<'info, Mint>,
-
-    #[account(
-        mut,
-        constraint = user_token_account.mint == market.mint,
-        constraint = user_token_account.owner == user.key(),
-    )]
-    pub user_token_account: InterfaceAccount<'info, TokenAccount>,
+    pub reward_vault: SystemAccount<'info>,
 
     #[account(mut)]
     pub user: Signer<'info>,
 
-    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
@@ -81,44 +71,37 @@ pub fn handler(ctx: Context<PlaceBet>, side: u8, amount: u64, price: u32) -> Res
         require!(now < market.window_end, SwipeError::WindowClosed);
     }
 
-    // 1) fee (2%) → reward vault
+    // 1) fee (2%) → reward vault. Amounts are lamports (SOL, 9 decimals).
     let fee = amount
         .checked_mul(FEE_BPS)
         .ok_or(SwipeError::Overflow)?
         .checked_div(BPS_DENOMINATOR)
         .ok_or(SwipeError::Overflow)?;
     let net = amount.checked_sub(fee).ok_or(SwipeError::Overflow)?;
-    let decimals = ctx.accounts.mint.decimals;
 
     if fee > 0 {
-        transfer_checked(
+        transfer(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                TransferChecked {
-                    from: ctx.accounts.user_token_account.to_account_info(),
-                    mint: ctx.accounts.mint.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.user.to_account_info(),
                     to: ctx.accounts.reward_vault.to_account_info(),
-                    authority: ctx.accounts.user.to_account_info(),
                 },
             ),
             fee,
-            decimals,
         )?;
     }
 
     // 2) net stake → market vault
-    transfer_checked(
+    transfer(
         CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            TransferChecked {
-                from: ctx.accounts.user_token_account.to_account_info(),
-                mint: ctx.accounts.mint.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.user.to_account_info(),
                 to: ctx.accounts.vault.to_account_info(),
-                authority: ctx.accounts.user.to_account_info(),
             },
         ),
         net,
-        decimals,
     )?;
 
     // 3) reward pool accounting

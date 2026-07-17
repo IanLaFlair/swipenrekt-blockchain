@@ -1,7 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{
-    transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
-};
+use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::constants::*;
 use crate::errors::SwipeError;
@@ -10,9 +8,9 @@ use crate::state::RewardPool;
 
 // ============================================================================
 // claim_set_reward — pay a user who completed a country set a % share of the
-// live reward pool. Eligibility is attested by the pool authority (backend)
-// co-signing this instruction. The payout is a percentage of the *current*
-// vault balance (never a fixed number), so the pool can never go negative.
+// live reward vault. Eligibility is attested by the pool authority (backend)
+// co-signing. The payout is a percentage of the *current* vault balance (never
+// a fixed number), so the pool can never go negative. Native SOL.
 // ============================================================================
 
 #[derive(Accounts)]
@@ -22,33 +20,25 @@ pub struct ClaimSetReward<'info> {
         seeds = [REWARD_POOL_SEED],
         bump = reward_pool.bump,
         has_one = authority @ SwipeError::Unauthorized,
-        has_one = mint @ SwipeError::CardSupplyMismatch,
     )]
     pub reward_pool: Account<'info, RewardPool>,
 
+    /// Reward vault (system-owned PDA holding lamports only).
     #[account(
         mut,
         seeds = [REWARD_VAULT_SEED],
         bump = reward_pool.vault_bump,
     )]
-    pub reward_vault: InterfaceAccount<'info, TokenAccount>,
-
-    pub mint: InterfaceAccount<'info, Mint>,
-
-    #[account(
-        mut,
-        constraint = user_token_account.mint == reward_pool.mint,
-        constraint = user_token_account.owner == user.key(),
-    )]
-    pub user_token_account: InterfaceAccount<'info, TokenAccount>,
+    pub reward_vault: SystemAccount<'info>,
 
     /// Recipient of the reward.
+    #[account(mut)]
     pub user: SystemAccount<'info>,
 
     /// Backend keeper that attests set completion by co-signing.
     pub authority: Signer<'info>,
 
-    pub token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handler(
@@ -62,7 +52,7 @@ pub fn handler(
         SwipeError::InvalidDistributionBps
     );
 
-    let vault_balance = ctx.accounts.reward_vault.amount;
+    let vault_balance = ctx.accounts.reward_vault.lamports();
     require!(vault_balance > 0, SwipeError::InsufficientRewardPool);
 
     let amount: u64 = (vault_balance as u128)
@@ -72,22 +62,19 @@ pub fn handler(
         .ok_or(SwipeError::Overflow)? as u64;
     require!(amount > 0, SwipeError::InsufficientRewardPool);
 
-    // Transfer from reward vault (authority = reward_pool PDA) → user.
-    let signer: &[&[u8]] = &[REWARD_POOL_SEED, &[ctx.accounts.reward_pool.bump]];
+    // Transfer from reward vault (system-owned PDA) → user, signed with seeds.
+    let signer: &[&[u8]] = &[REWARD_VAULT_SEED, &[ctx.accounts.reward_pool.vault_bump]];
 
-    transfer_checked(
+    transfer(
         CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            TransferChecked {
+            ctx.accounts.system_program.to_account_info(),
+            Transfer {
                 from: ctx.accounts.reward_vault.to_account_info(),
-                mint: ctx.accounts.mint.to_account_info(),
-                to: ctx.accounts.user_token_account.to_account_info(),
-                authority: ctx.accounts.reward_pool.to_account_info(),
+                to: ctx.accounts.user.to_account_info(),
             },
             &[signer],
         ),
         amount,
-        ctx.accounts.mint.decimals,
     )?;
 
     let pool = &mut ctx.accounts.reward_pool;

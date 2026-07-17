@@ -20,7 +20,7 @@ pub mod txoracle;
 use instructions::*;
 use txoracle::types::ValidateStatArgs;
 
-declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+declare_id!("iZvZwSKPvRZpEqxyXSiRGos9pGuuzygmKdcAB6biffQ");
 
 #[program]
 pub mod swipe_n_rekt {

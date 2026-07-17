@@ -1,11 +1,13 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 use crate::constants::*;
 use crate::errors::SwipeError;
 use crate::events::MarketInitialized;
 use crate::state::{Comparison, Market, MarketStatus};
 
+/// Create a new market (one swipe card). The escrow vault is a native-SOL PDA
+/// (system-owned, lamports only) created lazily by the first `place_bet`, so
+/// there is no token account to init — we only record its bump for signing.
 #[derive(Accounts)]
 #[instruction(fixture_id: i64, stat_key: u32, period: i32, threshold: i32, comparison: u8, window_start: i64)]
 pub struct InitializeMarket<'info> {
@@ -25,24 +27,9 @@ pub struct InitializeMarket<'info> {
     )]
     pub market: Account<'info, Market>,
 
-    /// Escrow vault for this market (PDA-owned token account).
-    #[account(
-        init,
-        payer = authority,
-        seeds = [VAULT_SEED, market.key().as_ref()],
-        bump,
-        token::mint = mint,
-        token::authority = market,
-    )]
-    pub vault: InterfaceAccount<'info, TokenAccount>,
-
-    /// USDC mint (devnet).
-    pub mint: InterfaceAccount<'info, Mint>,
-
     #[account(mut)]
     pub authority: Signer<'info>,
 
-    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
@@ -63,6 +50,10 @@ pub fn handler(
         SwipeError::InvalidComparison
     );
 
+    let market_key = ctx.accounts.market.key();
+    let (_, vault_bump) =
+        Pubkey::find_program_address(&[VAULT_SEED, market_key.as_ref()], ctx.program_id);
+
     let market = &mut ctx.accounts.market;
     market.fixture_id = fixture_id;
     market.stat_key = stat_key;
@@ -76,9 +67,8 @@ pub fn handler(
     market.status = MarketStatus::Open;
     market.winning_side = None;
     market.authority = ctx.accounts.authority.key();
-    market.mint = ctx.accounts.mint.key();
     market.bump = ctx.bumps.market;
-    market.vault_bump = ctx.bumps.vault;
+    market.vault_bump = vault_bump;
 
     emit!(MarketInitialized {
         market: market.key(),

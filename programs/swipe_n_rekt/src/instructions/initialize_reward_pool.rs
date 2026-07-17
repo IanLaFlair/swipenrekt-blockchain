@@ -1,10 +1,11 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 use crate::constants::*;
 use crate::state::RewardPool;
 
-/// One-time setup of the global reward pool + its token vault.
+/// One-time setup of the global reward pool. Its vault is a native-SOL PDA
+/// (system-owned, lamports only) created lazily by the first fee transfer, so
+/// there is no token account to init here — we only record its bump.
 #[derive(Accounts)]
 pub struct InitializeRewardPool<'info> {
     #[account(
@@ -16,34 +17,22 @@ pub struct InitializeRewardPool<'info> {
     )]
     pub reward_pool: Account<'info, RewardPool>,
 
-    /// Reward pool vault (PDA-owned token account).
-    #[account(
-        init,
-        payer = authority,
-        seeds = [REWARD_VAULT_SEED],
-        bump,
-        token::mint = mint,
-        token::authority = reward_pool,
-    )]
-    pub reward_vault: InterfaceAccount<'info, TokenAccount>,
-
-    pub mint: InterfaceAccount<'info, Mint>,
-
     #[account(mut)]
     pub authority: Signer<'info>,
 
-    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
 pub fn handler(ctx: Context<InitializeRewardPool>) -> Result<()> {
+    let (_, vault_bump) =
+        Pubkey::find_program_address(&[REWARD_VAULT_SEED], ctx.program_id);
+
     let pool = &mut ctx.accounts.reward_pool;
     pool.total_collected = 0;
     pool.total_distributed = 0;
     pool.current_period = 0;
     pool.authority = ctx.accounts.authority.key();
-    pool.mint = ctx.accounts.mint.key();
     pool.bump = ctx.bumps.reward_pool;
-    pool.vault_bump = ctx.bumps.reward_vault;
+    pool.vault_bump = vault_bump;
     Ok(())
 }

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Swipe n Rekt — on-chain escrow, oracle settlement, reward pool & cNFT cards (Solana/Anchor)"
 edition = "2021"
 
+
 [lib]
 crate-type = ["cdylib", "lib"]
 name = "swipe_n_rekt"
